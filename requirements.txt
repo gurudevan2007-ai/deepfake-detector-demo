@@ -1,0 +1,7 @@
+torch
+torchvision
+opencv-python-headless
+facenet-pytorch
+grad-cam
+gradio
+numpy
