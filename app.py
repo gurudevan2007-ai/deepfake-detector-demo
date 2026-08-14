@@ -1,6 +1,4 @@
-# Deepfake Video Detector — Hugging Face Spaces version
-# Model file (stage1_efficientnet_v2.pth) must be uploaded alongside this file.
-
+# Deepfake Video Detector — Polished UI version (Gradio Blocks)
 import torch
 import torch.nn as nn
 from torchvision.models import efficientnet_b0
@@ -15,11 +13,10 @@ import os
 
 # ---- CONFIG ----
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-# On Spaces, the model file sits in the same folder as this script
 MODEL_PATH = os.path.join(os.path.dirname(__file__), 'stage1_efficientnet_v2.pth')
-FRAME_SAMPLE_COUNT = 10
+FRAME_SAMPLE_COUNT = 6  # reduced from 10 for faster response on limited CPU
 
-# ---- LOAD MODEL (once, at startup) ----
+# ---- LOAD MODEL ----
 model = efficientnet_b0(weights=None)
 model.classifier[1] = nn.Linear(model.classifier[1].in_features, 1)
 model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
@@ -37,14 +34,15 @@ target_layers = [model.features[-1]]
 cam = GradCAM(model=model, target_layers=target_layers)
 
 
-def analyze_video(video_path):
+def analyze_video(video_path, progress=gr.Progress()):
     if video_path is None:
-        return "No video uploaded.", None
+        return "Please upload a video first.", None, None
 
+    progress(0, desc="Reading video...")
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if total_frames <= 0:
-        return "Could not read video.", None
+        return "Could not read this video file.", None, None
 
     sample_indices = np.linspace(0, total_frames - 1, FRAME_SAMPLE_COUNT, dtype=int)
 
@@ -52,7 +50,8 @@ def analyze_video(video_path):
     best_face_tensor = None
     best_prob_extremity = -1
 
-    for idx in sample_indices:
+    for i, idx in enumerate(sample_indices):
+        progress((i + 1) / len(sample_indices), desc=f"Analyzing frame {i+1}/{len(sample_indices)}...")
         cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
         ret, frame = cap.read()
         if not ret:
@@ -82,17 +81,30 @@ def analyze_video(video_path):
     cap.release()
 
     if len(probs) == 0:
-        return "No face detected in this video. Try a clearer, front-facing clip.", None
+        return (
+            "**No face detected.** Try a clearer, front-facing, well-lit clip.",
+            None,
+            None,
+        )
 
     avg_prob = sum(probs) / len(probs)
-    label = "FAKE" if avg_prob > 0.5 else "REAL"
-    confidence_pct = avg_prob * 100 if label == "FAKE" else (1 - avg_prob) * 100
+    is_fake = avg_prob > 0.5
+    label = "FAKE" if is_fake else "REAL"
+    confidence_pct = avg_prob * 100 if is_fake else (1 - avg_prob) * 100
 
-    result_text = (
-        f"### Prediction: {label}\n"
-        f"**Confidence:** {confidence_pct:.1f}%\n\n"
-        f"(Average fake-probability across {len(probs)} sampled frames: {avg_prob:.3f})"
-    )
+    color = "#e74c3c" if is_fake else "#2ecc71"
+    icon = "⚠️" if is_fake else "✅"
+
+    result_html = f"""
+    <div style="text-align:center; padding: 20px; border-radius: 12px; background: {color}22; border: 2px solid {color};">
+        <div style="font-size: 42px;">{icon}</div>
+        <div style="font-size: 28px; font-weight: 700; color: {color}; margin-top: 8px;">{label}</div>
+        <div style="font-size: 16px; color: #ccc; margin-top: 6px;">Confidence: {confidence_pct:.1f}%</div>
+        <div style="font-size: 12px; color: #888; margin-top: 10px;">
+            Based on {len(probs)} of {FRAME_SAMPLE_COUNT} sampled frames &middot; avg fake-probability {avg_prob:.3f}
+        </div>
+    </div>
+    """
 
     heatmap_image = None
     if best_face_tensor is not None:
@@ -103,26 +115,73 @@ def analyze_video(video_path):
         grayscale_cam = cam(input_tensor=input_tensor)[0]
         heatmap_image = show_cam_on_image(face_np, grayscale_cam, use_rgb=True)
 
-    return result_text, heatmap_image
+    return result_html, heatmap_image, gr.update(visible=True)
 
 
-demo = gr.Interface(
-    fn=analyze_video,
-    inputs=gr.Video(label="Upload a video clip"),
-    outputs=[
-        gr.Markdown(label="Result"),
-        gr.Image(label="Grad-CAM: where the model focused"),
-    ],
-    title="Deepfake Video Detector",
-    description=(
-        "Upload a short video clip. The model samples frames, detects the face, "
-        "and predicts whether the video is real or a deepfake. The heatmap shows "
-        "which facial regions most influenced the model's decision — trained on "
-        "FaceForensics++ (Deepfakes, Face2Face, FaceSwap), evaluated cross-dataset "
-        "on Celeb-DF (83.3% accuracy)."
-    ),
+# ---- CUSTOM THEME ----
+theme = gr.themes.Soft(
+    primary_hue="indigo",
+    secondary_hue="purple",
+    neutral_hue="slate",
+).set(
+    body_background_fill="*neutral_950",
+    block_background_fill="*neutral_900",
+    block_border_width="1px",
+    block_shadow="*shadow_drop_lg",
 )
 
-# Render provides the port via the PORT environment variable
+CUSTOM_CSS = """
+#title { text-align: center; margin-bottom: 0px; }
+#subtitle { text-align: center; color: #999; margin-top: 4px; margin-bottom: 24px; }
+.stat-badge {
+    display: inline-block; padding: 4px 14px; border-radius: 20px;
+    background: #6366f122; border: 1px solid #6366f1; color: #a5b4fc;
+    font-size: 13px; margin: 0 4px;
+}
+"""
+
+with gr.Blocks(theme=theme, css=CUSTOM_CSS, title="Deepfake Video Detector") as demo:
+    gr.HTML("""
+        <h1 id="title">🎭 Deepfake Video Detector</h1>
+        <p id="subtitle">Upload a video &mdash; AI analyzes facial regions and shows you exactly what it sees</p>
+        <div style="text-align:center; margin-bottom: 20px;">
+            <span class="stat-badge">📊 83.3% cross-dataset accuracy</span>
+            <span class="stat-badge">🧠 EfficientNet-B0</span>
+            <span class="stat-badge">🔍 Grad-CAM explainability</span>
+        </div>
+    """)
+
+    with gr.Row():
+        with gr.Column(scale=1):
+            video_input = gr.Video(label="Upload a video clip")
+            analyze_btn = gr.Button("🔎 Analyze Video", variant="primary", size="lg")
+            gr.Markdown(
+                "*Tip: short, front-facing, well-lit clips work best. "
+                "First run may take up to a minute on the free server.*"
+            )
+
+        with gr.Column(scale=1):
+            result_output = gr.HTML(label="Result")
+            heatmap_output = gr.Image(label="Grad-CAM: what the model focused on", show_label=True)
+
+    with gr.Accordion("ℹ️ How this works", open=False):
+        gr.Markdown("""
+        This model was trained on **FaceForensics++** (Deepfakes, Face2Face, and FaceSwap
+        manipulation methods) and evaluated cross-dataset on **Celeb-DF** to test real-world
+        generalization — achieving **83.3% accuracy** on completely unseen fake-generation techniques.
+
+        The model samples several frames from your video, detects the face in each, and predicts
+        real vs. fake per frame. The final result is the average across all frames.
+
+        The **Grad-CAM heatmap** highlights which facial regions most influenced the model's decision
+        — warm colors (red/orange) show where the model is "looking" when making its call.
+        """)
+
+    analyze_btn.click(
+        fn=analyze_video,
+        inputs=[video_input],
+        outputs=[result_output, heatmap_output, video_input],
+    )
+
 port = int(os.environ.get("PORT", 7860))
 demo.launch(server_name="0.0.0.0", server_port=port)
