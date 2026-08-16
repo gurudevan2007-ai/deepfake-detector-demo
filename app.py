@@ -7,7 +7,6 @@ from facenet_pytorch import MTCNN
 import cv2
 import numpy as np
 from pytorch_grad_cam import GradCAM
-from pytorch_grad_cam.utils.image import show_cam_on_image
 import gradio as gr
 import os
 
@@ -32,6 +31,16 @@ transform = transforms.Compose([
 
 target_layers = [model.features[-1]]
 cam = GradCAM(model=model, target_layers=target_layers)
+
+
+def overlay_heatmap(rgb_image_float, grayscale_cam, alpha=0.5):
+    """Lightweight replacement for pytorch_grad_cam's show_cam_on_image,
+    using only OpenCV (avoids pulling in matplotlib)."""
+    heatmap = cv2.applyColorMap(np.uint8(255 * grayscale_cam), cv2.COLORMAP_JET)
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    overlay = (1 - alpha) * rgb_image_float + alpha * heatmap
+    overlay = overlay / overlay.max() if overlay.max() > 0 else overlay
+    return np.uint8(255 * overlay)
 
 
 def analyze_video(video_path, progress=gr.Progress()):
@@ -113,7 +122,7 @@ def analyze_video(video_path, progress=gr.Progress()):
             transforms.ToPILImage()(best_face_tensor.mul(0.5).add(0.5))
         ).unsqueeze(0).to(DEVICE)
         grayscale_cam = cam(input_tensor=input_tensor)[0]
-        heatmap_image = show_cam_on_image(face_np, grayscale_cam, use_rgb=True)
+        heatmap_image = overlay_heatmap(face_np, grayscale_cam)
 
     return result_html, heatmap_image, gr.update(visible=True)
 
@@ -140,7 +149,7 @@ CUSTOM_CSS = """
 }
 """
 
-with gr.Blocks(theme=theme, css=CUSTOM_CSS, title="Deepfake Video Detector") as demo:
+with gr.Blocks(title="Deepfake Video Detector") as demo:
     gr.HTML("""
         <h1 id="title">🎭 Deepfake Video Detector</h1>
         <p id="subtitle">Upload a video &mdash; AI analyzes facial regions and shows you exactly what it sees</p>
@@ -183,5 +192,12 @@ with gr.Blocks(theme=theme, css=CUSTOM_CSS, title="Deepfake Video Detector") as 
         outputs=[result_output, heatmap_output, video_input],
     )
 
+demo.queue(max_size=3, default_concurrency_limit=1)
+
 port = int(os.environ.get("PORT", 7860))
-demo.launch(server_name="0.0.0.0", server_port=port)
+demo.launch(
+    server_name="0.0.0.0",
+    server_port=port,
+    theme=theme,
+    css=CUSTOM_CSS,
+)
